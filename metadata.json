@@ -1,0 +1,5 @@
+{
+  "name": "PokeDefense AI",
+  "description": "A Pokemon-themed tower defense game where you defend against waves of shadow Pokemon. Features an AI Advisor (Professor Oak) powered by Gemini to give real-time tactical advice.",
+  "requestFramePermissions": []
+}

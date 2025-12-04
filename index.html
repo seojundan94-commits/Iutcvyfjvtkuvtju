@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PokeDefense AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Custom Scrollbar */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 20px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background-color: #94a3b8;
+        }
+    </style>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "@google/genai": "https://esm.sh/@google/genai@0.1.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/"
+  }
+}
+</script>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="typescript,react">
+        import React, { useState, useEffect, useRef, useCallback } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { GoogleGenAI } from "@google/genai";
+
+        // --- TYPES ---
+
+        enum ElementType {
+            NORMAL = 'Normal',
+            FIRE = 'Fire',
+            WATER = 'Water',
+            GRASS = 'Grass',
+            ELECTRIC = 'Electric',
+            ICE = 'Ice',
+            FIGHTING = 'Fighting',
+            PSYCHIC = 'Psychic',
+            ROCK = 'Rock',
+            GHOST = 'Ghost',
+            DRAGON = 'Dragon'
+        }
+
+        interface Coordinates {
+            x: number;
+            y: number;
+        }
+
+        interface Enemy {
+            id: string;
+            type: ElementType;
+            hp: number;
+            maxHp: number;
+            speed: number;
+            position: Coordinates;
+            pathIndex: number;
+            frozen: number;
+            name: string;
+            reward: number;
+        }
+
+        interface Tower {
+            id: string;
+            type: ElementType;
+            name: string;
+            x: number;
+            y: number;
+            damage: number;
+            range: number;
+            attackSpeed: number;
+            lastAttackTime: number;
+            level: number;
+            cost: number;
+        }
+
+        interface Projectile {
+            id: string;
+            startX: number;
+            startY: number;
+            targetX: number;
+            targetY: number;
+            element: ElementType;
+            progress: number;
+        }
+
+        interface GameState {
+            money: number;
+            lives: number;
+            wave: number;
+            isPlaying: boolean;
+            isGameOver: boolean;
+            gameSpeed: number;
+        }
+
+        interface TowerConfig {
+            name: string;
+            type: ElementType;
+            cost: number;
+            damage: number;
+            range: number;
+            attackSpeed: number;
+            color: string;
+            description: string;
+        }
+
+        // --- CONSTANTS ---
+
+        const GRID_SIZE = 12;
+        const CELL_SIZE = 50;
+
+        const PATH_COORDINATES: Coordinates[] = [
+            { x: 0, y: 1 }, { x: 1, y: 1 }, { x: 2, y: 1 }, { x: 3, y: 1 },
+            { x: 3, y: 2 }, { x: 3, y: 3 }, { x: 2, y: 3 }, { x: 1, y: 3 },
+            { x: 1, y: 4 }, { x: 1, y: 5 }, { x: 1, y: 6 }, { x: 2, y: 6 },
+            { x: 3, y: 6 }, { x: 4, y: 6 }, { x: 5, y: 6 }, { x: 6, y: 6 },
+            { x: 6, y: 5 }, { x: 6, y: 4 }, { x: 7, y: 4 }, { x: 8, y: 4 },
+            { x: 9, y: 4 }, { x: 9, y: 5 }, { x: 9, y: 6 }, { x: 9, y: 7 },
+            { x: 9, y: 8 }, { x: 8, y: 8 }, { x: 7, y: 8 }, { x: 6, y: 8 },
+            { x: 5, y: 8 }, { x: 4, y: 8 }, { x: 4, y: 9 }, { x: 4, y: 10 },
+            { x: 5, y: 10 }, { x: 6, y: 10 }, { x: 7, y: 10 }, { x: 8, y: 10 },
+            { x: 9, y: 10 }, { x: 10, y: 10 }, { x: 11, y: 10 }
+        ];
+
+        const TOWER_TYPES: Record<string, TowerConfig> = {
+            // --- STARTERS & BASICS ---
+            CHARMANDER: { name: 'Charmander', type: ElementType.FIRE, cost: 50, damage: 20, range: 2.5, attackSpeed: 800, color: 'bg-red-500', description: 'High damage, effective against Grass.' },
+            SQUIRTLE: { name: 'Squirtle', type: ElementType.WATER, cost: 60, damage: 10, range: 3, attackSpeed: 1000, color: 'bg-blue-500', description: 'Slows enemies, effective against Fire.' },
+            BULBASAUR: { name: 'Bulbasaur', type: ElementType.GRASS, cost: 45, damage: 15, range: 3.5, attackSpeed: 1200, color: 'bg-green-500', description: 'Long range, effective against Water.' },
+            PIKACHU: { name: 'Pikachu', type: ElementType.ELECTRIC, cost: 100, damage: 12, range: 2.5, attackSpeed: 400, color: 'bg-yellow-400', description: 'Very fast attack speed.' },
+            
+            // --- NORMAL ---
+            PIDGEY: { name: 'Pidgey', type: ElementType.NORMAL, cost: 30, damage: 8, range: 4, attackSpeed: 900, color: 'bg-stone-400', description: 'Cheap, long range scout.' },
+            RATTATA: { name: 'Rattata', type: ElementType.NORMAL, cost: 25, damage: 10, range: 2, attackSpeed: 700, color: 'bg-purple-300', description: 'Very cheap, short range.' },
+            MEOWTH: { name: 'Meowth', type: ElementType.NORMAL, cost: 120, damage: 15, range: 2.5, attackSpeed: 600, color: 'bg-amber-200', description: 'Pay Day: Decent speed and damage.' },
+            SNORLAX: { name: 'Snorlax', type: ElementType.NORMAL, cost: 400, damage: 100, range: 2, attackSpeed: 2000, color: 'bg-blue-900', description: 'Massive damage, very slow attack.' },
+            EEVEE: { name: 'Eevee', type: ElementType.NORMAL, cost: 80, damage: 18, range: 3, attackSpeed: 800, color: 'bg-orange-300', description: 'Balanced adaptability.' },
+
+            // --- FIRE ---
+            VULPIX: { name: 'Vulpix', type: ElementType.FIRE, cost: 90, damage: 25, range: 3, attackSpeed: 900, color: 'bg-red-400', description: 'Burns targets effectively.' },
+            ARCANINE: { name: 'Arcanine', type: ElementType.FIRE, cost: 350, damage: 60, range: 2.5, attackSpeed: 500, color: 'bg-orange-500', description: 'Legendary speed and power.' },
+            MAGMAR: { name: 'Magmar', type: ElementType.FIRE, cost: 200, damage: 45, range: 3, attackSpeed: 1100, color: 'bg-red-600', description: 'Heavy fire damage.' },
+            CHARIZARD: { name: 'Charizard', type: ElementType.FIRE, cost: 600, damage: 150, range: 4, attackSpeed: 1500, color: 'bg-orange-600', description: 'Ultimate Fire power.' },
+
+            // --- WATER ---
+            PSYDUCK: { name: 'Psyduck', type: ElementType.WATER, cost: 70, damage: 15, range: 3, attackSpeed: 900, color: 'bg-cyan-400', description: 'Confusingly effective.' },
+            GYARADOS: { name: 'Gyarados', type: ElementType.WATER, cost: 500, damage: 90, range: 4.5, attackSpeed: 1200, color: 'bg-blue-700', description: 'Rampaging destruction.' },
+            STARMIE: { name: 'Starmie', type: ElementType.WATER, cost: 220, damage: 30, range: 3.5, attackSpeed: 400, color: 'bg-violet-600', description: 'Rapid spin attacks.' },
+            LAPRAS: { name: 'Lapras', type: ElementType.ICE, cost: 300, damage: 40, range: 4, attackSpeed: 1300, color: 'bg-cyan-500', description: 'Ice beam freezes enemies.' },
+
+            // --- GRASS ---
+            ODDISH: { name: 'Oddish', type: ElementType.GRASS, cost: 40, damage: 12, range: 3, attackSpeed: 1000, color: 'bg-green-700', description: 'Basic grass support.' },
+            EXEGGUTOR: { name: 'Exeggutor', type: ElementType.GRASS, cost: 250, damage: 55, range: 3.5, attackSpeed: 1400, color: 'bg-yellow-700', description: 'Psychic grass power.' },
+            SCYTHER: { name: 'Scyther', type: ElementType.GRASS, cost: 180, damage: 35, range: 1.5, attackSpeed: 300, color: 'bg-green-400', description: 'Extremely fast melee cuts.' },
+
+            // --- ELECTRIC ---
+            MAGNEMITE: { name: 'Magnemite', type: ElementType.ELECTRIC, cost: 110, damage: 20, range: 3.5, attackSpeed: 800, color: 'bg-gray-400', description: 'Consistent electric shocks.' },
+            ELECTABUZZ: { name: 'Electabuzz', type: ElementType.ELECTRIC, cost: 230, damage: 40, range: 3, attackSpeed: 600, color: 'bg-yellow-500', description: 'Thunder puncher.' },
+            JOLTEON: { name: 'Jolteon', type: ElementType.ELECTRIC, cost: 280, damage: 25, range: 3, attackSpeed: 200, color: 'bg-yellow-300', description: 'Lightning fast attacks.' },
+
+            // --- PSYCHIC ---
+            ABRA: { name: 'Abra', type: ElementType.PSYCHIC, cost: 150, damage: 35, range: 5, attackSpeed: 1500, color: 'bg-pink-400', description: 'Long range psychic blasts.' },
+            ALAKAZAM: { name: 'Alakazam', type: ElementType.PSYCHIC, cost: 450, damage: 120, range: 4, attackSpeed: 1000, color: 'bg-pink-600', description: 'Master of psychic power.' },
+            MEWTWO: { name: 'Mewtwo', type: ElementType.PSYCHIC, cost: 1000, damage: 300, range: 5, attackSpeed: 1200, color: 'bg-purple-200', description: 'The ultimate genetic Pokemon.' },
+
+            // --- FIGHTING ---
+            MACHOP: { name: 'Machop', type: ElementType.FIGHTING, cost: 60, damage: 18, range: 1.5, attackSpeed: 700, color: 'bg-orange-700', description: 'Strong melee punches.' },
+            HITMONLEE: { name: 'Hitmonlee', type: ElementType.FIGHTING, cost: 190, damage: 45, range: 2, attackSpeed: 800, color: 'bg-amber-800', description: 'The Kicking Demon.' },
+
+            // --- ROCK ---
+            GEODUDE: { name: 'Geodude', type: ElementType.ROCK, cost: 50, damage: 25, range: 2, attackSpeed: 1500, color: 'bg-stone-500', description: 'Slow but hits hard.' },
+            ONIX: { name: 'Onix', type: ElementType.ROCK, cost: 160, damage: 30, range: 4, attackSpeed: 1800, color: 'bg-stone-600', description: 'Large range rock throws.' },
+
+            // --- GHOST ---
+            GASTLY: { name: 'Gastly', type: ElementType.GHOST, cost: 130, damage: 20, range: 3.5, attackSpeed: 900, color: 'bg-indigo-900', description: 'Spooky spectral attacks.' },
+            GENGAR: { name: 'Gengar', type: ElementType.GHOST, cost: 380, damage: 85, range: 3, attackSpeed: 700, color: 'bg-purple-800', description: 'Shadow ball barrage.' },
+
+            // --- ICE ---
+            JYNX: { name: 'Jynx', type: ElementType.ICE, cost: 210, damage: 50, range: 3, attackSpeed: 1100, color: 'bg-fuchsia-700', description: 'Freezing kisses.' },
+            ARTICUNO: { name: 'Articuno', type: ElementType.ICE, cost: 700, damage: 180, range: 5, attackSpeed: 1500, color: 'bg-sky-300', description: 'Legendary Ice Bird.' },
+
+            // --- DRAGON ---
+            DRATINI: { name: 'Dratini', type: ElementType.DRAGON, cost: 200, damage: 30, range: 3, attackSpeed: 800, color: 'bg-indigo-400', description: 'Small dragon rage.' },
+            DRAGONITE: { name: 'Dragonite', type: ElementType.DRAGON, cost: 800, damage: 200, range: 4, attackSpeed: 1000, color: 'bg-orange-200', description: 'Hyper Beam destruction.' }
+        };
+
+        const INITIAL_MONEY = 150;
+        const INITIAL_LIVES = 20;
+        const FPS = 60;
+
+        const TYPE_CHART: Record<ElementType, ElementType[]> = {
+            [ElementType.NORMAL]: [],
+            [ElementType.FIRE]: [ElementType.GRASS, ElementType.ICE],
+            [ElementType.WATER]: [ElementType.FIRE, ElementType.ROCK],
+            [ElementType.GRASS]: [ElementType.WATER, ElementType.ROCK],
+            [ElementType.ELECTRIC]: [ElementType.WATER], 
+            [ElementType.ICE]: [ElementType.GRASS, ElementType.DRAGON],
+            [ElementType.FIGHTING]: [ElementType.NORMAL, ElementType.ICE, ElementType.ROCK],
+            [ElementType.PSYCHIC]: [ElementType.FIGHTING],
+            [ElementType.ROCK]: [ElementType.FIRE, ElementType.ICE],
+            [ElementType.GHOST]: [ElementType.PSYCHIC, ElementType.GHOST],
+            [ElementType.DRAGON]: [ElementType.DRAGON]
+        };
+
+        // --- SERVICES ---
+
+        let ai = null;
+
+        // Simple check to avoid crashing if process is undefined (browser env)
+        const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : undefined;
+
+        if (apiKey) {
+            ai = new GoogleGenAI({ apiKey });
+        }
+
+        const getProfessorOakAdvice = async (
+            gameState: GameState,
+            towers: Tower[]
+        ): Promise<string> => {
+            if (!ai) return "Professor Oak is currently offline (Check API Key).";
+
+            const towerSummary = towers.map(t => t.name).join(', ');
+            
+            const prompt = `
+                You are Professor Oak from Pokemon. The player is playing a Tower Defense game.
+                
+                Current Game State:
+                - Wave: ${gameState.wave}
+                - Money: ${gameState.money}
+                - Lives Left: ${gameState.lives}
+                - Player's Pokemon (Towers): ${towerSummary || "None yet"}
+                
+                Give a short, helpful, and encouraging piece of tactical advice (max 2 sentences) in Korean (Hangul). 
+                Focus on type matchups (Fire > Grass, Water > Fire, Grass > Water, Electric is fast) or resource management.
+                Be characteristically enthusiastic like Professor Oak.
+            `;
+
+            try {
+                const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+                });
+                return response.text || "Keep going, trainer!";
+            } catch (error) {
+                console.error("Gemini Error:", error);
+                return "Study your type matchups closely!";
+            }
+        };
+
+        // --- COMPONENTS ---
+
+        // GridCell
+        const GridCell: React.FC<{
+            x: number;
+            y: number;
+            isPath: boolean;
+            tower?: Tower;
+            isValidPlacement: boolean;
+            onPlace: (x: number, y: number) => void;
+        }> = ({ x, y, isPath, tower, isValidPlacement, onPlace }) => {
+            const handleClick = () => {
+                if (!tower && !isPath) {
+                    onPlace(x, y);
+                }
+            };
+
+            let bgColor = 'bg-gray-100';
+            let borderColor = 'border-gray-200';
+            
+            if (isPath) {
+                bgColor = 'bg-amber-100';
+                borderColor = 'border-amber-200';
+            } else if (tower) {
+                switch (tower.type) {
+                    case ElementType.FIRE: bgColor = 'bg-red-100'; break;
+                    case ElementType.WATER: bgColor = 'bg-blue-100'; break;
+                    case ElementType.GRASS: bgColor = 'bg-green-100'; break;
+                    case ElementType.ELECTRIC: bgColor = 'bg-yellow-100'; break;
+                    case ElementType.ICE: bgColor = 'bg-cyan-100'; break;
+                    case ElementType.FIGHTING: bgColor = 'bg-orange-100'; break;
+                    case ElementType.PSYCHIC: bgColor = 'bg-pink-100'; break;
+                    case ElementType.ROCK: bgColor = 'bg-stone-300'; break;
+                    case ElementType.GHOST: bgColor = 'bg-purple-200'; break;
+                    case ElementType.DRAGON: bgColor = 'bg-indigo-100'; break;
+                    default: bgColor = 'bg-gray-200';
+                }
+            }
+
+            const getTowerColor = (type: ElementType) => {
+                switch(type) {
+                    case ElementType.FIRE: return 'bg-red-500';
+                    case ElementType.WATER: return 'bg-blue-500';
+                    case ElementType.GRASS: return 'bg-green-500';
+                    case ElementType.ELECTRIC: return 'bg-yellow-400';
+                    case ElementType.ICE: return 'bg-cyan-400';
+                    case ElementType.FIGHTING: return 'bg-orange-600';
+                    case ElementType.PSYCHIC: return 'bg-pink-500';
+                    case ElementType.ROCK: return 'bg-stone-600';
+                    case ElementType.GHOST: return 'bg-indigo-800';
+                    case ElementType.DRAGON: return 'bg-violet-600';
+                    case ElementType.NORMAL: return 'bg-stone-400';
+                    default: return 'bg-gray-500';
+                }
+            }
+
+            return (
+                <div
+                    onClick={handleClick}
+                    className={`
+                        w-full h-full border ${borderColor} ${bgColor} 
+                        relative flex items-center justify-center
+                        ${!isPath && !tower ? 'hover:bg-gray-200 cursor-pointer' : ''}
+                        transition-colors duration-200
+                    `}
+                >
+                    {tower && (
+                        <div className={`w-3/4 h-3/4 rounded-full shadow-md flex items-center justify-center font-bold text-xs text-white ${getTowerColor(tower.type)}`}>
+                        {tower.name.substring(0, 1)}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ProfessorOak
+        const ProfessorOak: React.FC<{ gameState: GameState; towers: Tower[] }> = ({ gameState, towers }) => {
+            const [advice, setAdvice] = useState<string>("Welcome to the world of Pokemon Defense! Prepare your defenses!");
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                if (gameState.wave > 0) {
+                    fetchAdvice();
+                }
+            }, [gameState.wave]);
+
+            const fetchAdvice = async () => {
+                setLoading(true);
+                const newAdvice = await getProfessorOakAdvice(gameState, towers);
+                setAdvice(newAdvice);
+                setLoading(false);
+            };
+
+            return (
+                <div className="bg-white rounded-lg p-4 shadow-lg border-2 border-slate-200 flex flex-col gap-2">
+                    <div className="flex items-center gap-3 border-b pb-2 mb-1">
+                        <div className="w-12 h-12 rounded-full bg-slate-300 flex items-center justify-center overflow-hidden border-2 border-slate-400">
+                            <svg viewBox="0 0 24 24" fill="none" className="w-8 h-8 text-slate-600" stroke="currentColor" strokeWidth="2">
+                                <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+                                <circle cx="12" cy="7" r="4" />
+                            </svg>
+                        </div>
+                        <div>
+                            <h3 className="font-bold text-slate-800">Professor Oak (AI)</h3>
+                            <span className="text-xs text-slate-500">Gemini 2.5 Flash</span>
+                        </div>
+                    </div>
+                    
+                    <div className="min-h-[60px] text-sm text-slate-700 italic relative">
+                        {loading ? (
+                            <div className="flex items-center gap-2 text-slate-400 animate-pulse">
+                                <span>Thinking...</span>
+                            </div>
+                        ) : (
+                            `"${advice}"`
+                        )}
+                    </div>
+
+                    <button 
+                        onClick={fetchAdvice}
+                        disabled={loading}
+                        className="self-end text-xs text-blue-600 hover:text-blue-800 underline disabled:opacity-50"
+                    >
+                        Ask again
+                    </button>
+                </div>
+            );
+        };
+
+        // --- MAIN APP ---
+
+        const App: React.FC = () => {
+            // Game State
+            const [gameState, setGameState] = useState<GameState>({
+                money: INITIAL_MONEY,
+                lives: INITIAL_LIVES,
+                wave: 0,
+                isPlaying: false,
+                isGameOver: false,
+                gameSpeed: 1,
+            });
+
+            const [towers, setTowers] = useState<Tower[]>([]);
+            const [enemies, setEnemies] = useState<Enemy[]>([]);
+            const [projectiles, setProjectiles] = useState<Projectile[]>([]);
+            const [selectedTowerKey, setSelectedTowerKey] = useState<string | null>(null);
+
+            // Refs
+            const gameStateRef = useRef(gameState);
+            const towersRef = useRef(towers);
+            const enemiesRef = useRef(enemies);
+            const projectilesRef = useRef(projectiles);
+            
+            const waveActiveRef = useRef(false);
+            const enemiesToSpawnRef = useRef<Enemy[]>([]);
+            const spawnTimerRef = useRef(0);
+
+            // Sync refs
+            useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+            useEffect(() => { towersRef.current = towers; }, [towers]);
+            useEffect(() => { enemiesRef.current = enemies; }, [enemies]);
+            useEffect(() => { projectilesRef.current = projectiles; }, [projectiles]);
+
+            const calculateDamage = useCallback((towerType: ElementType, enemyType: ElementType, baseDamage: number) => {
+                const strongAgainst = TYPE_CHART[towerType];
+                if (strongAgainst.includes(enemyType)) return baseDamage * 2;
+                const weakAgainst = TYPE_CHART[enemyType];
+                if (weakAgainst && weakAgainst.includes(towerType)) return baseDamage * 0.5;
+                return baseDamage;
+            }, []);
+
+            const spawnWave = (waveNumber: number) => {
+                const enemyCount = 5 + Math.floor(waveNumber * 1.5);
+                const newEnemies: Enemy[] = [];
+                
+                let waveType = ElementType.NORMAL;
+                const types = Object.values(ElementType);
+                if (waveNumber > 1) {
+                    waveType = types[(waveNumber) % types.length];
+                }
+
+                const hpMultiplier = 1 + (waveNumber * 0.4);
+
+                for (let i = 0; i < enemyCount; i++) {
+                    newEnemies.push({
+                        id: `e-${waveNumber}-${i}`,
+                        type: waveType,
+                        hp: 20 * hpMultiplier,
+                        maxHp: 20 * hpMultiplier,
+                        speed: 1.5 + (waveNumber * 0.05),
+                        position: { ...PATH_COORDINATES[0] },
+                        pathIndex: 0,
+                        frozen: 0,
+                        name: `Shadow ${waveType}`,
+                        reward: 10 + waveNumber
+                    });
+                }
+                enemiesToSpawnRef.current = newEnemies;
+                waveActiveRef.current = true;
+                setGameState(prev => ({ ...prev, wave: waveNumber, isPlaying: true }));
+            };
+
+            const handleStartNextWave = () => {
+                if (waveActiveRef.current || enemies.length > 0) return;
+                spawnWave(gameState.wave + 1);
+            };
+
+            const handlePlaceTower = (x: number, y: number) => {
+                if (!selectedTowerKey || gameState.isGameOver) return;
+                
+                const config = TOWER_TYPES[selectedTowerKey];
+                if (gameState.money < config.cost) return;
+
+                const isPath = PATH_COORDINATES.some(c => c.x === x && c.y === y);
+                if (isPath) return;
+
+                const hasTower = towers.some(t => t.x === x && t.y === y);
+                if (hasTower) return;
+
+                const newTower: Tower = {
+                    id: `t-${Date.now()}`,
+                    ...config,
+                    x,
+                    y,
+                    lastAttackTime: 0,
+                    level: 1
+                };
+
+                setTowers(prev => [...prev, newTower]);
+                setGameState(prev => ({ ...prev, money: prev.money - config.cost }));
+                setSelectedTowerKey(null);
+            };
+
+            useEffect(() => {
+                if (gameState.isGameOver) return;
+
+                let lastTime = performance.now();
+                let frameId: number;
+
+                const loop = (time: number) => {
+                    const deltaTime = time - lastTime;
+                    lastTime = time;
+
+                    let activeEnemies = [...enemiesRef.current];
+
+                    // 1. Spawning
+                    if (waveActiveRef.current && enemiesToSpawnRef.current.length > 0) {
+                        spawnTimerRef.current += deltaTime;
+                        if (spawnTimerRef.current > 1000) {
+                            const nextEnemy = enemiesToSpawnRef.current.shift();
+                            if (nextEnemy) {
+                                activeEnemies.push(nextEnemy);
+                            }
+                            spawnTimerRef.current = 0;
+                        }
+                    } else if (waveActiveRef.current && enemiesToSpawnRef.current.length === 0) {
+                        waveActiveRef.current = false;
+                    }
+
+                    // 2. Movement
+                    let livesLost = 0;
+                    let moneyGained = 0;
+
+                    const movedEnemies = activeEnemies.map(e => {
+                        const currentSpeed = e.frozen > 0 ? e.speed * 0.5 : e.speed;
+                        const moveAmt = (currentSpeed * deltaTime) / 1000;
+                        
+                        if (e.pathIndex < PATH_COORDINATES.length - 1) {
+                            const target = PATH_COORDINATES[e.pathIndex + 1];
+                            const dx = target.x - e.position.x;
+                            const dy = target.y - e.position.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+
+                            if (dist <= moveAmt) {
+                                return {
+                                    ...e,
+                                    position: { ...target },
+                                    pathIndex: e.pathIndex + 1,
+                                    frozen: Math.max(0, e.frozen - deltaTime)
+                                };
+                            } else {
+                                const angle = Math.atan2(dy, dx);
+                                return {
+                                    ...e,
+                                    position: {
+                                        x: e.position.x + Math.cos(angle) * moveAmt,
+                                        y: e.position.y + Math.sin(angle) * moveAmt
+                                    },
+                                    frozen: Math.max(0, e.frozen - deltaTime)
+                                };
+                            }
+                        }
+                        return e;
+                    });
+
+                    const survivingEnemies: Enemy[] = [];
+                    movedEnemies.forEach(e => {
+                        if (e.pathIndex >= PATH_COORDINATES.length - 1) {
+                            livesLost++;
+                        } else if (e.hp > 0) {
+                            survivingEnemies.push(e);
+                        } else {
+                            moneyGained += e.reward;
+                        }
+                    });
+
+                    if (livesLost > 0 || moneyGained > 0) {
+                        setGameState(prev => {
+                            const newLives = prev.lives - livesLost;
+                            return {
+                                ...prev,
+                                lives: newLives,
+                                money: prev.money + moneyGained,
+                                isGameOver: newLives <= 0
+                            };
+                        });
+                        if (gameStateRef.current.lives - livesLost <= 0) return; 
+                    }
+
+                    // 3. Attacks
+                    const currentTowers = towersRef.current;
+                    const newProjectiles: Projectile[] = [...projectilesRef.current];
+                    const now = Date.now();
+
+                    currentTowers.forEach(tower => {
+                        if (now - tower.lastAttackTime >= tower.attackSpeed) {
+                            const target = survivingEnemies.find(e => {
+                                const dist = Math.sqrt(Math.pow(e.position.x - tower.x, 2) + Math.pow(e.position.y - tower.y, 2));
+                                return dist <= tower.range;
+                            });
+
+                            if (target) {
+                                tower.lastAttackTime = now;
+                                target.hp -= calculateDamage(tower.type, target.type, tower.damage);
+                                
+                                if (tower.type === ElementType.WATER || tower.type === ElementType.ICE) {
+                                    target.frozen = 2000;
+                                }
+
+                                newProjectiles.push({
+                                    id: `p-${now}-${Math.random()}`,
+                                    startX: tower.x,
+                                    startY: tower.y,
+                                    targetX: target.position.x,
+                                    targetY: target.position.y,
+                                    element: tower.type,
+                                    progress: 0
+                                });
+                            }
+                        }
+                    });
+
+                    // 4. Projectiles
+                    const activeProjectiles = newProjectiles
+                        .map(p => ({ ...p, progress: p.progress + (deltaTime * 0.005) }))
+                        .filter(p => p.progress < 1);
+
+                    setEnemies(survivingEnemies);
+                    setProjectiles(activeProjectiles);
+                    
+                    frameId = requestAnimationFrame(loop);
+                };
+
+                frameId = requestAnimationFrame(loop);
+                return () => cancelAnimationFrame(frameId);
+            }, [gameState.isGameOver, calculateDamage]);
+
+            const renderGrid = () => {
+                const grid = [];
+                for (let y = 0; y < GRID_SIZE; y++) {
+                    const row = [];
+                    for (let x = 0; x < GRID_SIZE; x++) {
+                        const isPath = PATH_COORDINATES.some(c => c.x === x && c.y === y);
+                        const tower = towers.find(t => t.x === x && t.y === y);
+                        row.push(
+                            <div key={`${x}-${y}`} style={{ width: CELL_SIZE, height: CELL_SIZE }}>
+                                <GridCell
+                                    x={x} y={y}
+                                    isPath={isPath}
+                                    tower={tower}
+                                    isValidPlacement={!!selectedTowerKey}
+                                    onPlace={handlePlaceTower}
+                                />
+                            </div>
+                        );
+                    }
+                    grid.push(<div key={y} className="flex">{row}</div>);
+                }
+                return grid;
+            };
+
+            const getProjectileColor = (type: ElementType) => {
+                switch(type) {
+                    case ElementType.FIRE: return 'bg-red-500';
+                    case ElementType.WATER: return 'bg-blue-500';
+                    case ElementType.GRASS: return 'bg-green-500';
+                    case ElementType.ELECTRIC: return 'bg-yellow-400';
+                    case ElementType.ICE: return 'bg-cyan-300';
+                    case ElementType.FIGHTING: return 'bg-orange-600';
+                    case ElementType.PSYCHIC: return 'bg-pink-400';
+                    case ElementType.ROCK: return 'bg-stone-500';
+                    case ElementType.GHOST: return 'bg-indigo-700';
+                    case ElementType.DRAGON: return 'bg-violet-600';
+                    default: return 'bg-gray-400';
+                }
+            };
+
+            const getEnemyColor = (type: ElementType) => {
+                switch(type) {
+                    case ElementType.FIRE: return '#ef4444';
+                    case ElementType.WATER: return '#3b82f6';
+                    case ElementType.GRASS: return '#22c55e';
+                    case ElementType.ELECTRIC: return '#facc15';
+                    case ElementType.ICE: return '#67e8f9';
+                    case ElementType.FIGHTING: return '#ea580c';
+                    case ElementType.PSYCHIC: return '#ec4899';
+                    case ElementType.ROCK: return '#78716c';
+                    case ElementType.GHOST: return '#4338ca';
+                    case ElementType.DRAGON: return '#7c3aed';
+                    default: return '#a3a3a3';
+                }
+            };
+
+            return (
+                <div className="h-screen bg-slate-50 flex flex-col font-sans text-slate-800 overflow-hidden">
+                    <header className="bg-red-600 text-white p-3 shadow-md flex justify-between items-center shrink-0 z-10">
+                        <h1 className="text-xl font-bold tracking-tight">PokeDefense AI</h1>
+                        <div className="flex gap-4 text-sm font-semibold">
+                            <div className="bg-red-700 px-3 py-1 rounded">Wave: {gameState.wave}</div>
+                            <div className="bg-red-700 px-3 py-1 rounded">Lives: {gameState.lives}</div>
+                            <div className="bg-yellow-500 text-red-900 px-3 py-1 rounded">Money: ${gameState.money}</div>
+                        </div>
+                    </header>
+
+                    <main className="flex-grow flex flex-col lg:flex-row h-full overflow-hidden">
+                        <div className="flex-grow relative bg-slate-200 overflow-auto flex items-center justify-center p-4">
+                            <div className="relative bg-white p-2 rounded-xl shadow-xl border-4 border-slate-300 select-none">
+                                {gameState.isGameOver && (
+                                    <div className="absolute inset-0 z-50 bg-black/70 flex flex-col items-center justify-center text-white rounded-lg">
+                                        <h2 className="text-4xl font-bold mb-4">Game Over</h2>
+                                        <p className="mb-6 text-xl">You survived {gameState.wave - 1} waves</p>
+                                        <button 
+                                            onClick={() => window.location.reload()}
+                                            className="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-full transition"
+                                        >
+                                            Try Again
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="relative">
+                                    {renderGrid()}
+                                    
+                                    {enemies.map(e => (
+                                        <div
+                                            key={e.id}
+                                            className="absolute w-6 h-6 rounded-full border-2 border-white shadow-sm flex items-center justify-center text-[10px] font-bold text-white transition-transform z-10"
+                                            style={{
+                                                left: e.position.x * CELL_SIZE + 13,
+                                                top: e.position.y * CELL_SIZE + 13,
+                                                backgroundColor: getEnemyColor(e.type)
+                                            }}
+                                        >
+                                            <div className="absolute -top-3 w-8 h-1 bg-gray-300 rounded overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-green-500" 
+                                                    style={{ width: `${(e.hp / e.maxHp) * 100}%` }}
+                                                />
+                                            </div>
+                                            {e.name[0]}
+                                        </div>
+                                    ))}
+
+                                    {projectiles.map(p => (
+                                        <div
+                                            key={p.id}
+                                            className={`absolute w-3 h-3 rounded-full z-20 ${getProjectileColor(p.element)}`}
+                                            style={{
+                                                left: (p.startX + (p.targetX - p.startX) * p.progress) * CELL_SIZE + 20,
+                                                top: (p.startY + (p.targetY - p.startY) * p.progress) * CELL_SIZE + 20,
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="w-full lg:w-[450px] bg-white shadow-xl flex flex-col border-l border-slate-200 h-1/2 lg:h-full shrink-0">
+                            <div className="p-4 bg-slate-50 border-b border-slate-200">
+                                <ProfessorOak gameState={gameState} towers={towers} />
+                            </div>
+
+                            <div className="flex-grow overflow-y-auto p-4 custom-scrollbar">
+                                <button
+                                    onClick={handleStartNextWave}
+                                    disabled={waveActiveRef.current || enemies.length > 0 || gameState.isGameOver}
+                                    className="w-full mb-4 bg-red-600 hover:bg-red-700 disabled:bg-slate-300 disabled:text-slate-500 text-white font-bold py-3 rounded-lg shadow transition sticky top-0 z-10"
+                                >
+                                    {gameState.wave === 0 ? "Start Game" : "Next Wave"}
+                                </button>
+
+                                {selectedTowerKey && (
+                                    <div className="mb-4 text-xs bg-blue-50 border border-blue-200 p-3 rounded text-blue-800 sticky top-[60px] z-10 shadow-sm">
+                                        <div className="flex justify-between font-bold mb-1">
+                                            <span>{TOWER_TYPES[selectedTowerKey].name}</span>
+                                            <span>${TOWER_TYPES[selectedTowerKey].cost}</span>
+                                        </div>
+                                        <div>{TOWER_TYPES[selectedTowerKey].description}</div>
+                                        <div className="mt-1 text-[10px] uppercase font-semibold text-blue-400">
+                                            Type: {TOWER_TYPES[selectedTowerKey].type}
+                                        </div>
+                                    </div>
+                                )}
+
+                                <h3 className="font-bold text-lg mb-3 pb-2 border-b">Recruit Pokemon</h3>
+                                <div className="grid grid-cols-4 gap-2 mb-4">
+                                    {Object.entries(TOWER_TYPES).map(([key, config]) => (
+                                        <button
+                                            key={key}
+                                            onClick={() => setSelectedTowerKey(selectedTowerKey === key ? null : key)}
+                                            disabled={gameState.money < config.cost}
+                                            className={`
+                                                flex flex-col items-center justify-center p-2 rounded-lg border transition aspect-square
+                                                ${selectedTowerKey === key ? 'border-red-500 bg-red-50 ring-2 ring-red-200' : 'border-slate-200 hover:border-slate-400'}
+                                                ${gameState.money < config.cost ? 'opacity-40 grayscale cursor-not-allowed' : ''}
+                                            `}
+                                            title={`${config.name} - $${config.cost}`}
+                                        >
+                                            <div className={`w-8 h-8 rounded-full mb-1 ${config.color} text-white flex items-center justify-center font-bold text-xs shadow-sm`}>
+                                                {config.name[0]}
+                                            </div>
+                                            <span className="font-bold text-[10px] truncate w-full text-center">{config.name}</span>
+                                            <span className="text-[10px] text-slate-500 font-mono">${config.cost}</span>
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <div className="bg-slate-100 rounded-lg p-3 text-xs text-slate-500 mt-4">
+                                    <h4 className="font-bold mb-2 text-slate-700">Type Tips</h4>
+                                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                                        <div>🔥 Fire {'>'} 🌿 Grass</div>
+                                        <div>💧 Water {'>'} 🔥 Fire</div>
+                                        <div>🌿 Grass {'>'} 💧 Water</div>
+                                        <div>⚡ Elec {'>'} 💧 Water</div>
+                                        <div>❄️ Ice {'>'} 🐲 Dragon</div>
+                                        <div>👊 Fight {'>'} 🪨 Rock</div>
+                                        <div>🔮 Psych {'>'} 👊 Fight</div>
+                                        <div>👻 Ghost {'>'} 🔮 Psych</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
